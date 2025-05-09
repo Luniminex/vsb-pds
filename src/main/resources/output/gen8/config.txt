@@ -1,0 +1,6 @@
+Width: 750
+Height: 750
+InitialInfectedCount: 5
+InfectionProbability: 0,10000
+RecoveryProbability: 0,05000
+Seed: 123456789

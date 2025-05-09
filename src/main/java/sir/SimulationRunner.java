@@ -1,98 +1,149 @@
 package sir;
 
-import org.jgrapht.Graph;
-import org.jgrapht.graph.DefaultEdge;
-import sir.graph.GraphDataManager;
-import sir.graph.GraphSupplier;
-import sir.graph.SimulationLogger;
-import sir.model.Node;
-import sir.solver.ParallelSIRSolver;
-import sir.solver.SequentialSIRSolver;
+import sir.grid.OutputManager;
+import sir.grid.GridSupplier;
+import sir.grid.SimulationLogger;
+import sir.model.Configuration;
+import sir.solver.*;
 
 import java.io.IOException;
-import java.nio.file.*;
-import java.util.Comparator;
-import java.util.List;
-import java.util.Random;
-import java.util.SplittableRandom;
-import java.util.stream.Collectors;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.function.Supplier;
 
 public class SimulationRunner {
 
-    private static final Double infectionRate = 0.1;
-    private static final Double recoveryRate = 0.05;
-    public static void main(String[] args) throws Exception {
-        if (args.length == 1) {
-            runSingleGraph(args[0]);
-        } else {
-            runAllGraphs();
-        }
+    private static final int GRID_WIDTH = 3000;
+    private static final int GRID_HEIGHT = 3000;
+    private static final int INITIAL_INFECTED_COUNT = 5;
+    private static final double INFECTION_PROBABILITY = 0.1;
+    private static final double RECOVERY_PROBABILITY = 0.05;
+    private static final Long SEED = 123456789L;
+    private static final int THREAD_COUNT = Runtime.getRuntime().availableProcessors();
+    private static final String BASE_OUTPUT_DIRECTORY = "src/main/resources/output";
+    private static final int NUMBER_OF_REPEATS = 2;
+
+    private static String sanitizeSolverName(String solverName) {
+        return solverName.replaceAll("[^a-zA-Z0-9.-]", "_").replaceAll("__+", "_");
     }
 
-    private static void runSingleGraph(String filename) throws Exception {
-        Graph<Node, DefaultEdge> graph = GraphDataManager.loadGraph(filename);
-        GraphSupplier supplier = new GraphSupplier(graph);
-        long seed = 12345L;
+    public static void main(String[] args) throws IOException {
+        //Create configuration that is same for all of the solvers
+        Configuration configuration = new Configuration(
+                GRID_WIDTH,
+                GRID_HEIGHT,
+                INITIAL_INFECTED_COUNT,
+                INFECTION_PROBABILITY,
+                RECOVERY_PROBABILITY,
+                SEED
+        );
 
-        System.out.println("Running simulation for: " + filename);
+        //Create output manager that will create a new directory for each run
+        OutputManager outputManager = new OutputManager(BASE_OUTPUT_DIRECTORY, configuration);
+        //Get the current run generation directory
+        Path currentRunGenDir = outputManager.getCurrentRunGenDir();
 
-        new SimulationRunnerBuilder()
-                .graph(graph)
-                .solver(new SequentialSIRSolver(supplier.copyNodes(), 0.05, 0.05, seed))
-                .logger(new SimulationLogger("output/single_seq.csv"))
-                .run();
+        System.out.printf("Overall simulation run. Outputting to base directory: %s%n", currentRunGenDir.toAbsolutePath());
+        System.out.printf("Each solver will be run %d times.%n%n", NUMBER_OF_REPEATS);
 
-        new SimulationRunnerBuilder()
-                .graph(graph)
-                .solver(new ParallelSIRSolver(supplier.copyNodes(), 0.05, 0.05, Runtime.getRuntime().availableProcessors(), seed))
-                .logger(new SimulationLogger("output/single_par.csv"))
-                .run();
+        //Create a grid supplier that will be used to create the grid for each solver
+        GridSupplier gridSupplier = new GridSupplier(
+                configuration.gridWidth(),
+                configuration.gridHeight(),
+                configuration.initialInfectedCount(),
+                configuration.seed()
+        );
+
+        //Create a supplier for each solver
+        Supplier<SIRSolver> forkJoinSupplier = createForkJoinSolverSupplier(gridSupplier, configuration, THREAD_COUNT);
+        Supplier<SIRSolver> completableFutureSupplier = createCompletableFutureSolverSupplier(gridSupplier, configuration, THREAD_COUNT);
+        Supplier<SIRSolver> simpleSequentialSupplier = createSimpleSequentialSolverSupplier(gridSupplier, configuration);
+        Supplier<SIRSolver> simpleParallelSupplier = createSimpleParallelSolverSupplier(gridSupplier, configuration, THREAD_COUNT);
+
+        //Run each solver for the specified number of repeats
+        runSolverRepeats(forkJoinSupplier, configuration, currentRunGenDir);
+        runSolverRepeats(completableFutureSupplier, configuration, currentRunGenDir);
+        runSolverRepeats(simpleSequentialSupplier, configuration, currentRunGenDir);
+        runSolverRepeats(simpleParallelSupplier, configuration, currentRunGenDir);
+        System.out.println("\nAll simulations completed. Overall output in: " + currentRunGenDir.toAbsolutePath());
     }
 
-    private static void runAllGraphs() throws IOException {
-        Path inputDir = Path.of("src/main/resources/graphs");
-        Path outputBase = Path.of("src/main/resources/output");
+    private static void runSolverRepeats(Supplier<SIRSolver> solverSupplier,
+                                         Configuration config,
+                                         Path currentRunGenDir) throws IOException {
+        // Create a temporary solver to get the name
+        SIRSolver tempSolverForName = solverSupplier.get();
+        // Use the solver's name to create a directory
+        String sanitizedSolverName = sanitizeSolverName(tempSolverForName.getName());
+        Path solverSpecificBaseDir = currentRunGenDir.resolve(sanitizedSolverName);
+        Files.createDirectories(solverSpecificBaseDir);
+        // Shutdown the temporary solver
+        tempSolverForName.shutdown();
 
-        int nextGen = Files.list(outputBase)
-                .filter(Files::isDirectory)
-                .map(Path::getFileName)
-                .map(Path::toString)
-                .filter(name -> name.startsWith("gen"))
-                .map(name -> name.substring(3))
-                .mapToInt(Integer::parseInt)
-                .max().orElse(0) + 1;
+        System.out.printf("--- Preparing to run solver: %s ---%n", tempSolverForName.getName());
+        for (int repeat = 1; repeat <= NUMBER_OF_REPEATS; repeat++) {
+            SIRSolver solver = solverSupplier.get();
 
-        Path thisRunDir = outputBase.resolve("gen" + nextGen);
-        Files.createDirectories(thisRunDir);
+            // Create a new log file for each repeat
+            Path logPath = solverSpecificBaseDir.resolve("run_" + repeat + "_stats.csv");
 
-        List<Path> graphFiles = Files.list(inputDir)
-                .filter(p -> p.toString().endsWith(".csv") || p.toString().endsWith(".txt"))
-                .sorted(Comparator.comparing(Path::toString))
-                .collect(Collectors.toList());
+            // Create a new output manager for each repeat
+            System.out.printf("-- Starting Repeat %d/%d for %s --%n", repeat, NUMBER_OF_REPEATS, solver.getName());
 
-        long seed = new SplittableRandom(System.currentTimeMillis()).nextLong();
-
-        for (Path graphFile : graphFiles) {
-            String name = graphFile.getFileName().toString();
-            String baseName = name.substring(0, name.lastIndexOf("."));
-            System.out.println("Loading graph: " + name);
-            Graph<Node, DefaultEdge> graph = GraphDataManager.loadGraph(name);
-            GraphSupplier supplier = new GraphSupplier(graph);
-
-            System.out.println("Running on: " + baseName + " with " + graph.vertexSet().size() + " nodes and " + graph.edgeSet().size() + " edges.");
+            // Create a new simulation runner and run the simulation
             new SimulationRunnerBuilder()
-                    .graph(graph)
-                    .solver(new SequentialSIRSolver(supplier.copyNodes(), infectionRate , recoveryRate, seed))
-                    .logger(new SimulationLogger(thisRunDir.resolve(baseName + "_seq.csv").toString()))
+                    .configuration(config)
+                    .solver(solver)
+                    .logger(new SimulationLogger(logPath.toString()), logPath)
                     .run();
 
-            new SimulationRunnerBuilder()
-                    .graph(graph)
-                    .solver(new ParallelSIRSolver(supplier.copyNodes(), infectionRate, recoveryRate, Runtime.getRuntime().availableProcessors(), seed))
-                    .logger(new SimulationLogger(thisRunDir.resolve(baseName + "_par.csv").toString()))
-                    .run();
+            if (repeat < NUMBER_OF_REPEATS) {
+                System.out.println();
+            }
         }
+        System.out.println();
+    }
 
-        System.out.println("All simulations completed. Output in: " + thisRunDir);
+    private static Supplier<SIRSolver> createForkJoinSolverSupplier(GridSupplier gridSupplier, Configuration configuration, int numThreads) {
+        return () -> new ForkJoinGridSIRSolver(
+                gridSupplier.copyNodes(),
+                gridSupplier.getWidth(),
+                gridSupplier.getHeight(),
+                configuration.infectionProbability(),
+                configuration.recoveryProbability(),
+                numThreads,
+                configuration.seed());
+    }
+
+    private static Supplier<SIRSolver> createCompletableFutureSolverSupplier(GridSupplier gridSupplier, Configuration configuration, int numThreads) {
+        return () -> new CompletableFutureSIRSolver(
+                gridSupplier.copyNodes(),
+                gridSupplier.getWidth(),
+                gridSupplier.getHeight(),
+                configuration.infectionProbability(),
+                configuration.recoveryProbability(),
+                numThreads,
+                configuration.seed());
+    }
+
+    private static Supplier<SIRSolver> createSimpleSequentialSolverSupplier(GridSupplier gridSupplier, Configuration configuration) {
+        return () -> new SimpleSequentialGridSIRSolver(
+                gridSupplier.copyNodes(),
+                gridSupplier.getWidth(),
+                gridSupplier.getHeight(),
+                configuration.infectionProbability(),
+                configuration.recoveryProbability(),
+                configuration.seed());
+    }
+
+    private static Supplier<SIRSolver> createSimpleParallelSolverSupplier(GridSupplier gridSupplier, Configuration configuration, int numThreads) {
+        return () -> new SimpleParallelGridSIRSolver(
+                gridSupplier.copyNodes(),
+                gridSupplier.getWidth(),
+                gridSupplier.getHeight(),
+                configuration.infectionProbability(),
+                configuration.recoveryProbability(),
+                numThreads,
+                configuration.seed());
     }
 }

@@ -1,5 +1,6 @@
 package sir.model;
 
+// Record used to store statistics for each simulation step
 public record StepStats(
         int tick,
         int newlyInfected,
@@ -7,7 +8,7 @@ public record StepStats(
         int totalSusceptible,
         int totalInfected,
         int totalRecovered,
-        long stepTimeNanos
+        Long stepTimeNanos
 ) {
     @Override
     public String toString() {

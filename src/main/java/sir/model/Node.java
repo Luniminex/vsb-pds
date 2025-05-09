@@ -1,19 +1,36 @@
 package sir.model;
 
-import java.util.ArrayList;
-import java.util.List;
-
+// Represents a node in the simulation grid
 public class Node {
-    public final int id;
-    public State state = State.SUSCEPTIBLE;
-    public List<Node> neighbors = new ArrayList<>();
+    public final int x;
+    public final int y;
+    public State state;
 
-    public Node(int id) {
-        this.id = id;
+    public Node(int x, int y) {
+        this.x = x;
+        this.y = y;
+        this.state = State.SUSCEPTIBLE;
+    }
+
+    public Node(Node other) {
+        this.x = other.x;
+        this.y = other.y;
+        this.state = other.state;
+    }
+
+    public Node(int x, int y, byte state) {
+        this.x = x;
+        this.y = y;
+        this.state = switch (state) {
+            case 0 -> State.SUSCEPTIBLE;
+            case 1 -> State.INFECTED;
+            case 2 -> State.RECOVERED;
+            default -> throw new IllegalArgumentException("Invalid state: " + state);
+        };
     }
 
     @Override
     public String toString() {
-        return "Node(" + id + ", " + state + ")";
+        return "Node(" + x + "," + y + ", " + state + ')';
     }
 }
